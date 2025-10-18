@@ -1,0 +1,780 @@
+---
+title: "survival analysis"
+finalized: 18-Oct-2025
+---
+
+The long-form df has one row for each month of an individual’s tenure. Each row was assigned its own start and stop value, with the first row per individual assigned a start value of ‘0’ and a stop value of ‘1’. Each row thereafter received a start value of the previous rows’ stop value and a stop value of the subsequent number until the end of an individual’s tenure. The ‘event’, in this case the occurrence of a takeover, was recorded as a ‘0’ for each row until the last row per individual (i.e., the month a takeover occurred), when it was recorded as a ‘1’. Individuals were recorded as having cysts (‘1’) for each row including and after the first month during which a cyst was recorded for them in the long-term data. The estimated age of each individual at the start of their tenure was calculated based on their estimated or known dates of birth. Each tenure was assigned a unique tenure.id, which was included as a cluster term in the cox model
+
+```{r}
+library(survival)
+library(survminer)
+library(broom)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(car)
+library(broom.mixed)
+library(performance)
+library(grid)
+library(performance)
+library(lubridate)
+library(stringr)
+library(purrr)
+library(patchwork)
+
+```
+
+read in data, explore, assess
+
+```{r}
+# read in long-form data
+ten_long = read.csv("~/tenure_29Aug.csv") # paths removed
+ten_long = ten_long %>%
+  mutate(
+    across(c(start_date_aligned, end_date_aligned, adjusted_end, month, cyst_date_aligned, dob), ~ ymd(.))
+  )
+ten_long= ten_long[!(ten_long$code == ""),] # remove those 5 blank rows
+
+length(unique(ten_long$code)) # 99 individuals
+table(ten_long$cyst) # 50 rows with cysts, 3078 rows without cysts
+length(unique(ten_long$tenure.id)) # 106 distinct tenures
+
+# how many had second tenures
+ten_long %>%
+  filter(grepl("-2$", tenure.id)) %>%
+  summarise(n_unique = n_distinct(tenure.id)) # 7 
+
+# get average second tenure length vs 1st
+ten_long %>%
+  group_by(tenure.id) %>%
+  summarise(
+    tenure_length = max(stop) - min(start),
+    .groups = "drop"
+  ) %>%
+  mutate(group = ifelse(grepl("-2$", tenure.id), "-2",
+                        ifelse(grepl("-1$", tenure.id), "-1", NA))) %>%
+  filter(!is.na(group)) %>%
+  group_by(group) %>%
+  summarise(
+    n_unique = n(),
+    mean_length = mean(tenure_length, na.rm = TRUE),
+    median_length = median(tenure_length, na.rm = TRUE),
+    range_length = diff(range(tenure_length, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# look at them
+sec_ten = ten_long %>%
+  filter(grepl("-2$", tenure.id)) 
+length(unique(sec_ten$code))
+
+# count how many males ever had cysts and how many rows from males while they had cysts
+ten_long %>%
+  summarise(
+    n_individuals = n_distinct(code[cyst == 1]), #6
+    n_rows        = sum(cyst == 1, na.rm = TRUE) #50
+  )
+
+ten_long %>%
+  summarise(
+    n_individuals = n_distinct(code[cyst == 0]), #97
+    n_rows        = sum(cyst == 0, na.rm = TRUE) #3078
+  )
+
+# sets
+codes_all = ten_long %>% distinct(code) %>% pull()
+codes1 = ten_long %>% filter(cyst == 1) %>% distinct(code) %>% pull()
+codes0 = ten_long %>% filter(cyst == 0) %>% distinct(code) %>% pull()
+codesNA = ten_long %>% filter(is.na(cyst)) %>% distinct(code) %>% pull()
+
+length(codes_all) # 99 
+length(codes1) # 6
+length(codes0) # 97
+length(intersect(codes1, codes0))
+
+### with group size as bin
+ten_long = ten_long %>%
+mutate(group_size = case_when(
+    N.Females >= 1 & N.Females <= 4 ~ "small",
+    N.Females >= 5 & N.Females <= 7 ~ "medium",
+    N.Females >= 8 & N.Females <= 12 ~ "large",
+    TRUE ~ NA_character_  
+  ))
+table(ten_long$group_size, useNA = "always")
+ten_long = ten_long[!(is.na(ten_long$tenure_length_aligned)),]
+nrow(ten_long) #3128
+```
+
+Remove tenures with unknown dobs/ages, impute missing social data
+
+```{r}
+# remove all with unknown ages 
+ten_long %>% filter(is.na(dob)) %>% distinct(code) %>% nrow() # 3, 61 rows
+nrow(ten_long) # 3128
+ten_long_cut = ten_long[!(is.na(ten_long$dob)),]
+nrow(ten_long_cut) # 3067
+
+# check for NAs in variables
+vars = c("N.Followers","N.Chaos","N.Former.Leaders","N.Females")
+ten_long_cut %>% filter(if_any(all_of(vars), is.na)) %>% nrow() # 31
+
+ten_long_cut = ten_long_cut %>%
+  mutate(.row_id = row_number())  
+
+# impute missing values in social variables
+library(mice); set.seed(1)
+to_impute = c("N.Followers","N.Chaos","N.Former.Leaders","N.Females")
+vars      = c("event","start","stop","tenure.id","cyst","age_at_month", to_impute)
+
+# only the four vars are imputed 
+ini  = mice(ten_long_cut[vars], maxit = 0, printFlag = FALSE)
+meth = ini$method
+pred = ini$predictorMatrix
+
+# impute only four variables
+meth[setdiff(vars, to_impute)] = ""
+meth[to_impute] = "pmm"
+
+# don't use tenure.id to predict. drop one of start/stop to avoid collinearity
+pred[, c("tenure.id","start")] = 0
+diag(pred) = 0
+
+# run mice for a single completed dataset
+imp  = mice(ten_long_cut[vars], m = 1, maxit = 20,
+             method = meth, predictorMatrix = pred, printFlag = TRUE)
+comp = complete(imp, 1)
+
+# add flags
+impute_flags = ten_long_cut %>% 
+  transmute(
+    .row_id,
+    across(all_of(to_impute),
+           ~ is.na(.x) & !is.na(comp[[cur_column()]]),
+           .names = "{.col}_imputed")
+  )
+
+#replace NAs in the original with imputed values
+ten_long_cc = ten_long_cut %>%
+  mutate(across(all_of(to_impute), ~ dplyr::coalesce(.x, comp[[cur_column()]]))) %>%
+  left_join(impute_flags, by = ".row_id") %>%
+  select(-.row_id)
+
+# recheck for NAs in variables
+vars = c("N.Followers","N.Chaos","N.Former.Leaders","N.Females")
+ten_long_cc %>% filter(if_any(all_of(vars), is.na)) %>% nrow() # 0 good
+
+# recalculate the group_size variable
+ten_long_cc = ten_long_cc %>% mutate(group_size = case_when(
+    N.Females >= 1 & N.Females <= 4 ~ "small",
+    N.Females >= 5 & N.Females <= 7 ~ "medium",
+    N.Females >= 8 & N.Females <= 12 ~ "large",
+    TRUE ~ NA_character_  # assigns NA for values outside the specified range
+  ))
+```
+
+describe and summarize dataset
+
+```{r}
+
+nrow(ten_long_cc) # 3067
+length(unique(ten_long_cc$code)) # 96
+length(unique(ten_long_cc$tenure.id)) # 103
+sum(ten_long_cc$event == 1) # 87
+table(ten_long_cc$cyst) # 50 cyst rows, 3017 no cyst rows
+ten_long_cc %>%
+  filter(end_follow_still_leader == 1) %>%
+  distinct(code) %>%
+  nrow() # 16
+table(ten_long_cc$group_size) # large med small : 573   1039   1455 
+ten_long_cc %>%
+  group_by(code) %>%
+  mutate(cyst_status = if_else(any(cyst == 1, na.rm = TRUE), 1, 0)) %>%
+  ungroup() %>%
+  group_by(cyst_status) %>%
+  summarise(
+    unique_codes = n_distinct(code),
+    total_rows   = n()
+  ) # 6 males 
+ten_long_cc %>%
+  distinct(tenure.id) %>%                # unique tenure IDs
+  summarise(count = sum(str_ends(tenure.id, "-2")))
+
+#### summarize #### 
+
+# calculate  tenure info
+ten_means = ten_long_cc %>% select(code, tenure_length_aligned, tenure.id, cyst)
+ten_means = unique(ten_means)
+table(ten_means$code)
+length(unique(ten_means$code)) # 96
+length(unique(ten_means$tenure.id)) # 103
+hist(ten_means$tenure_length_aligned)
+mean(ten_means$tenure_length_aligned) # 934.9813
+934.9813 / 365.25 # 2.559839
+range(ten_means$tenure_length_aligned) # 30-3195
+
+# get right censored count (we ended follow with them as leader)
+right_cen = ten_long_cc[ten_long_cc$end_follow_still_leader == 1,]
+nrow(right_cen) # 603 rows
+length(unique(right_cen$code)) #16
+length(unique(right_cen$tenure.id)) #16
+
+## calculate mean tenure length for males that ever had a cyst versus never had a cyst, then also calculate mean tenure for individuals only once they developed a cyst
+
+# per-tenure lengths
+tenure_lengths = ten_long_cc %>%
+  summarise(
+    tenure_length = max(stop) - min(start),
+    ever_cyst     = any(cyst == 1, na.rm = TRUE),
+    .by = c(tenure.id, code)
+  )
+
+# Grouped + overall summaries in one object
+all_tenure = bind_rows(
+  tenure_lengths %>%
+    reframe(
+      mean_tenure = mean(tenure_length, na.rm = TRUE),
+      min_tenure  = min(tenure_length, na.rm = TRUE),
+      max_tenure  = max(tenure_length, na.rm = TRUE),
+      .by = ever_cyst
+    ) %>%
+    mutate(ever_cyst = if_else(ever_cyst, "TRUE", "FALSE")),
+  tenure_lengths %>%
+    summarise(
+      ever_cyst   = "Overall",
+      mean_tenure = mean(tenure_length, na.rm = TRUE),
+      min_tenure  = min(tenure_length, na.rm = TRUE),
+      max_tenure  = max(tenure_length, na.rm = TRUE)
+    )
+)
+
+# post-cyst tenure # 8.33, range: 1-20
+mean_after_cyst = ten_long_cc %>%
+  group_by(tenure.id, code) %>%
+  filter(any(cyst == 1, na.rm = TRUE)) %>%         
+  mutate(first_cyst = min(stop[cyst == 1], na.rm = TRUE)) %>%
+  filter(stop >= first_cyst) %>%            
+ summarise(
+    tenure_after_cyst = max(stop) - min(start),
+    .groups = "drop"
+  ) %>%
+  summarise(
+    mean_tenure_after_cyst = mean(tenure_after_cyst, na.rm = TRUE),
+    min_tenure_after_cyst  = min(tenure_after_cyst, na.rm = TRUE),
+    max_tenure_after_cyst  = max(tenure_after_cyst, na.rm = TRUE)
+  )
+```
+
+integrate information from urine samples to make the combined infection metric
+
+```{r}
+# read data
+df_months = ten_long_cc # this is the tenure df with rows for every month of tenure per male
+df_samples = read.csv("~/taenia_allmedia_allmales.csv")
+
+# format and match
+df_samples$collection_date = ymd(df_samples$collection_date)
+df_samples = df_samples %>%
+  rename(code = Code)
+
+# look
+table(df_samples$positive) # 111 P 213 N
+table(df_samples$code, df_samples$positive)
+
+####### find the most recent test result on/before each month for each code
+dfm = df_months %>%
+  mutate(month_lb = month - days(365))
+samples_by_month <- dfm %>%
+  left_join(
+    df_samples %>% select(code, collection_date, positive),
+    by = join_by(
+      code,
+      y$collection_date <= x$month,
+      y$collection_date >= x$month_lb
+    )
+  ) %>%
+  group_by(code, month) %>%
+  slice_max(order_by = collection_date, with_ties = FALSE, na_rm = TRUE) %>%
+  ungroup() %>%
+  transmute(
+    code, month,
+    last_sample_date   = collection_date,
+    last_sample_result = positive
+  )
+
+df_merged = df_months %>%
+  left_join(samples_by_month, by = c("code", "month")) %>%
+  mutate(days_since_last_sample = as.integer(month - last_sample_date))
+
+# look at the range of time periods between last test and month of tenure
+range(df_merged$days_since_last_sample, na.rm = T) # 1 - 359
+hist(df_merged$days_since_last_sample, na.rm = T)
+
+# make new column to combine cyst for that month and infection within a year
+df_merged = df_merged %>%
+  mutate(
+    global_inf = case_when(
+      cyst == 1L | last_sample_result == 1L           ~ "pos",
+      cyst == 0L & last_sample_result == 0L           ~ "neg",
+      TRUE                                            ~ "unknown"  # e.g., any NA/missing combo
+    ),
+    global_inf = factor(global_inf, levels = c("neg","pos","unknown"))
+  )
+
+# look at this
+nrow(df_merged) # 3067
+table(df_merged$event) # 87 events
+table(df_merged$event, df_merged$global_inf) # 2 neg, 11 pos, 74 unknown
+table(df_merged$event, df_merged$cyst) # 44, 6
+length(unique(df_merged$code)) # 96
+length(unique(df_merged$tenure.id)) # 103
+
+table(df_merged$event, df_merged$global_inf) ####### ok so checking event distribution shows that we only have 2 that tested negative within a year of being taken over, 11 that tested positive, and 74 that were unknown. 
+
+# merge negatives and unknowns into 'not_pos' because of sample size issues (no evidence of infection)
+df_merged = df_merged %>% mutate(global_inf = if_else(global_inf %in% c("neg", "unknown"),
+                              "not_pos",
+                              global_inf))
+```
+
+summarize 
+
+```{r}
+# look at this
+nrow(df_merged) # 3067
+table(df_merged$event) # 87 events
+table(df_merged$event, df_merged$global_inf) # 11 pos, 76 unknown
+table(df_merged$event, df_merged$cyst) # 81, 6
+length(unique(df_merged$code)) # 96
+length(unique(df_merged$tenure.id)) # 103
+global_inf_df = df_merged[df_merged$global_inf == "pos",]
+global_inf_df_opp = df_merged[!(df_merged$global_inf == "pos"),]
+length(unique(global_inf_df_opp$code)) #94
+
+# see how many shifted statuses
+shifts = df_merged %>%
+  group_by(code) %>%
+  arrange(start) %>% ungroup()
+
+# count each type of state change
+transitions_all = shifts %>%
+  mutate(next_cat = lead(global_inf)) %>%     
+  filter(!is.na(next_cat) & global_inf != next_cat) %>%  
+  count(global_inf, next_cat, name = "n_transitions")  
+
+# how many codes shifted
+shifts %>%
+  group_by(code) %>%
+  mutate(next_cat = lead(global_inf)) %>%
+  filter(!is.na(next_cat) & global_inf != next_cat) %>%
+  summarise(shifted = any(global_inf != next_cat), .groups = "drop") %>%
+  summarise(n_codes_shifted = n())
+
+# summarize
+df_merged %>% summarise(
+  pos_rows   = sum(global_inf == "pos", na.rm = TRUE),
+  pos_males  = n_distinct(code[global_inf == "pos"]),
+  cyst_rows  = sum(cyst == 1, na.rm = TRUE),
+  cyst_males = n_distinct(code[cyst == 1])
+)
+
+```
+
+cox model: combined infection metric and cyst modeled separately
+
+```{r}
+######## combined infection model ######## 
+
+cox_inf = coxph(
+    Surv(start, stop, event) ~ global_inf + age_at_month + N.Followers + N.Chaos + N.Former.Leaders + poly(N.Females, 2, raw = TRUE) + cluster(tenure.id), data = df_merged)
+
+# check PH
+cox.zph(cox_inf) # everything except for age and cyst again
+
+# add a time varying bit for age,  all others stratified
+cox_inf_strat = coxph(
+  Surv(start, stop, event) ~ global_inf  + strata(followers_cat) + strata(chaos_cat) + strata(former_cat) +  strata(group_size) + tt(age_at_month) + cluster(tenure.id),
+  data = df_merged,
+  tt = function(x, t, ...) x * log(pmax(t, 1)))
+
+# export as table
+coxresults_inf = tidy(cox_inf_strat, exponentiate = TRUE, conf.int = TRUE)  %>%
+  mutate(across(where(is.numeric), ~ format(round(.x, 3), nsmall = 3)))
+
+######## cyst model ######## 
+
+# initial model
+cm1 = coxph(Surv(start, stop, event) ~ cyst + age_at_month + N.Followers + N.Chaos + N.Former.Leaders + poly(N.Females, 2, raw = TRUE)  + cluster(tenure.id),  data = ten_long_cc)
+
+# check PH
+cox.zph(cm1) ### social variables violate PH assumptions
+
+# bin so that we can stratify and account for PH violations
+ten_long_cc = ten_long_cc %>%
+  mutate(
+    # followers: 0 | 1 | 2–3 | 4–5
+    followers_cat = case_match(
+      N.Followers,
+      0 ~ "0",
+      1 ~ "1",
+      .default    = if_else(N.Followers <= 3, "2–3", "4–5")),
+    # chaos : 0 | 1 | 2–4
+    chaos_cat = case_match(
+      N.Chaos,
+      0 ~ "0",
+      1 ~ "1",
+      .default = "2–4"),
+    # former leaders: 0 | 1 | 2+
+    former_cat = case_when(
+      N.Former.Leaders < 2 ~ as.character(N.Former.Leaders), # "0" or "1"
+      TRUE ~ "2+"
+    ))
+
+# model: stratify by bins, add a time varying bit for age
+cm2 = coxph(
+  Surv(start, stop, event) ~ cyst  + strata(followers_cat) + strata(chaos_cat) + strata(former_cat) + strata(group_size) + tt(age_at_month) + cluster(tenure.id),
+  data = ten_long_cc,
+  tt = function(x, t, ...) x * log(pmax(t, 1)))
+
+# export cm2as table
+coxresults = tidy(cm2, exponentiate = TRUE, conf.int = TRUE)  %>%
+  mutate(across(where(is.numeric), ~ format(round(.x, 3), nsmall = 3)))
+
+```
+
+survival plot for combined infection metric
+
+```{r}
+
+# format variables
+df_plot = df_merged %>%
+  mutate(
+    global_inf    = factor(global_inf, levels = c("not_pos","pos")),
+    age_tt        = age_at_month * log(pmax(stop, 1)),
+    followers_cat = factor(followers_cat),
+    chaos_cat     = factor(chaos_cat),
+    former_cat    = factor(former_cat),
+    group_size    = factor(group_size)
+  )
+
+# refit a simplified cox model without tt()
+cox_no_tt = coxph(
+  Surv(start, stop, event) ~ global_inf +
+    strata(followers_cat) + strata(chaos_cat) + strata(former_cat) + strata(group_size) +
+    age_tt + cluster(tenure.id),
+  data = df_plot
+)
+
+# make function to get population-average survival at chosen times
+population_survival = function(fit, data, group_level, times) {
+  newdata = mutate(data, global_inf = factor(group_level, levels = levels(data$global_inf)))
+  lp = predict(fit, newdata = newdata, type = "lp")
+  base = survfit(fit)
+  sapply(times, function(t) {
+    S0 = summary(base, times = t)$surv
+    mean(S0 ^ exp(lp), na.rm = TRUE)
+  })
+}
+
+# time grid
+times = seq(0, max(df_plot$stop, na.rm = TRUE), length.out = 100)
+
+# compute infection curves
+curves = bind_rows(
+  tibble(time = times,
+         surv = population_survival(cox_no_tt, df_plot, "not_pos", times),
+         group = "not_pos"),
+  tibble(time = times,
+         surv = population_survival(cox_no_tt, df_plot, "pos", times),
+         group = "pos")
+)
+
+# smooth the curve
+curves_mono = curves %>%
+  group_by(group) %>%
+  arrange(time, .by_group = TRUE) %>%
+  mutate(surv = cummin(surv)) %>%
+  ungroup()
+
+# fix labels
+curves_mono$group = ifelse(curves_mono$group == "not_pos", "non-infected", "infected")
+
+# plot
+smooth_inf = ggplot(curves_mono, aes(time, surv, color = group)) +
+  geom_step(linewidth = 1.1) +
+  scale_color_manual(
+    values = c("non-infected" = "#8CC9B8", "infected" = "#B887B0"),
+    breaks = c("infected","non-infected"),              
+    labels = c("infected","non-infected"),
+    name   = NULL
+  ) +
+  labs(x = "time (months)", y = "survival probability (tenure retained)") +
+  theme_classic(base_size = 18) +
+  theme(
+    legend.position   = c(0.84, 0.999),
+    legend.justification = c("right", "top"),
+    legend.background = element_rect(fill = alpha("white", 0.7), colour = NA)
+  ) +
+  labs(tag = "(a)")
+
+```
+
+compute two survival curves from the cox model (the refit without tt()) for positive and not positive
+difference (area) between the two curves = expected residual tenure lost (in months).Calculate mean, median, total tenure months lost, convert to years.
+
+```{r}
+# make a simpler male column
+# remove SHI-1 bc no male info
+df_merged = df_merged[!(df_merged$tenure.id == "SHI-1"), ]
+df_merged$total_cat = ifelse(df_merged$Total.Males > 1, 2, 1)
+
+# RMST helper
+rmst_from_curve_safe = function(time, surv, tau) {
+  t <- drop(time)
+  s <- drop(surv)
+  if (length(t) == 0L) return(tau)
+  keep <- t <= tau
+  if (!any(keep)) return(tau)               
+  last_idx <- max(which(keep))
+  tt <- c(0, t[keep], tau)
+  ss <- c(1, s[keep], s[last_idx])
+  sum(diff(tt) * (head(ss, -1) + tail(ss, -1)) / 2)
+}
+
+# function for computing weighted RMST summary at taus
+compute_rmst_summary = function(dat, taus) {
+  # Rebuild valid_pairs
+  valid_pairs <- dat %>%
+    group_by(total_cat, group_size, global_inf) %>%
+    summarise(has_time = sum(stop - start, na.rm = TRUE) > 0, .groups = "drop") %>%
+    pivot_wider(names_from = global_inf, values_from = has_time, values_fill = FALSE) %>%
+    filter(pos & not_pos) %>%
+    select(total_cat, group_size)
+  if (nrow(valid_pairs) == 0) {
+    return(map_dfr(taus, ~tibble(
+      tau = .x,
+      rmst_not_pos = NA_real_,
+      rmst_pos     = NA_real_,
+      lost_months  = NA_real_,
+      lost_years   = NA_real_
+    )))
+  }
+  # rebuild newdata and weights
+  newdat_base <- expand.grid(
+    global_inf   = c("not_pos","pos"),
+    age_at_month = mean(dat$age_at_month, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  ) %>%
+    crossing(valid_pairs)
+  strata_weights <- dat %>%
+    semi_join(valid_pairs, by = c("total_cat","group_size")) %>%
+    count(total_cat, group_size, name = "n") %>%
+    mutate(weight = n / sum(n))
+  # slign factor levels 
+  dat <- dat %>% mutate(global_inf = factor(global_inf, levels = c("not_pos","pos")))
+  # fit cox model
+  cox_fit <- coxph(
+    Surv(start, stop, event) ~ global_inf + age_at_month +
+      strata(total_cat) + strata(group_size) + cluster(tenure.id),
+    data = dat, ties = "efron"
+  )
+  # loop over taus, compute (stratum x infection) RMST, then weight
+  map_dfr(taus, function(tau) {
+    row_rmst <- pmap_dfr(
+      newdat_base,
+      function(global_inf, age_at_month, total_cat, group_size) {
+        nd <- data.frame(
+          global_inf   = factor(global_inf, levels = levels(dat$global_inf)),
+          age_at_month = age_at_month,
+          total_cat    = total_cat,
+          group_size   = group_size
+        )
+        sf <- tryCatch(survfit(cox_fit, newdata = nd), error = function(e) NULL)
+        tibble(
+          global_inf = global_inf,
+          total_cat  = total_cat,
+          group_size = group_size,
+          rmst = if (!is.null(sf)) rmst_from_curve_safe(sf$time, sf$surv, tau) else NA_real_
+        )
+      }
+    )
+
+    row_rmst %>%
+      left_join(strata_weights, by = c("total_cat","group_size")) %>%
+      group_by(global_inf) %>%
+      summarise(
+        rmst_weighted = if (all(is.na(rmst)) || all(is.na(weight)))
+                          NA_real_
+                        else
+                          stats::weighted.mean(rmst, weight, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      pivot_wider(names_from = global_inf, values_from = rmst_weighted) %>%
+      transmute(
+        tau,
+        rmst_not_pos = not_pos,
+        rmst_pos     = pos,
+        lost_months  = rmst_not_pos - rmst_pos,
+        lost_years   = lost_months / 12
+      )
+  })
+}
+
+# get point estimates at time horizons
+taus = c(12, 24, 36, 48, 60)
+rmst_point = compute_rmst_summary(df_merged, taus)
+
+# cluster bootstrap
+set.seed(123)
+B = 200  # increase to 1000+ for final results
+tenure_ids = unique(df_merged$tenure.id)
+
+# boot function
+boot_res = map_dfr(1:B, function(b) {
+  sampled_ids <- sample(tenure_ids, length(tenure_ids), replace = TRUE)
+  dat_b <- df_merged %>% filter(tenure.id %in% sampled_ids)
+    out <- tryCatch(compute_rmst_summary(dat_b, taus), error = function(e) NULL)
+  if (is.null(out)) return(NULL)
+  out$rep <- b
+  out
+})
+
+# summarize bootstrap distribution into CIs
+rmst_boot = boot_res %>%
+  group_by(tau) %>%
+  summarise(
+    lost_mean = mean(lost_months, na.rm = TRUE),
+    lost_lwr  = quantile(lost_months, 0.025, na.rm = TRUE),
+    lost_upr  = quantile(lost_months, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# combine point with boot
+rmst_full = rmst_point %>%
+  left_join(rmst_boot, by = "tau")
+
+```
+
+calculcate offspring impact
+
+```{r}
+avg_females = 5.514 # avg adult females per tenure
+IBI_years = 2.57 # interbirth interval (years)
+paternity_share = 0.90  # leader male share of paternity
+
+# births per female per month
+birthrate = 1 / (IBI_years * 12)
+
+# group birth rate per month
+birthrate_group = avg_females * birthrate
+
+# expected leader male births per month
+leader_birth_rate = birthrate_group * paternity_share
+
+# calculate offspring lost at each tau for pos/not pos
+rmst_full = rmst_full %>%
+  mutate(
+    # offspring equivalents
+    offspring_not_pos_mean = rmst_not_pos * leader_birth_rate,
+    offspring_not_pos_lwr  = (rmst_not_pos - (lost_mean - lost_lwr)) * leader_birth_rate,
+    offspring_not_pos_upr  = (rmst_not_pos + (lost_upr - lost_mean)) * leader_birth_rate,
+    
+    offspring_pos_mean = rmst_pos * leader_birth_rate,
+    offspring_pos_lwr  = (rmst_pos - (lost_mean - lost_lwr)) * leader_birth_rate,
+    offspring_pos_upr  = (rmst_pos + (lost_upr - lost_mean)) * leader_birth_rate,
+
+    # lost offspring from RMST contrast
+    offspring_lost_mean = lost_mean * leader_birth_rate,
+    offspring_lost_lwr  = lost_lwr  * leader_birth_rate,
+    offspring_lost_upr  = lost_upr  * leader_birth_rate
+  ) %>%
+  select(
+    tau,
+    rmst_not_pos, rmst_pos,
+    lost_mean, lost_lwr, lost_upr,
+    offspring_not_pos_mean, offspring_not_pos_lwr, offspring_not_pos_upr,
+    offspring_pos_mean, offspring_pos_lwr, offspring_pos_upr,
+    offspring_lost_mean, offspring_lost_lwr, offspring_lost_upr
+  ) %>%
+ mutate(across(where(is.numeric), ~ round(.x, 2))) 
+
+# plot before mutating for table
+boot_summary = rmst_full  
+
+offspring_plot = ggplot(boot_summary, aes(x = tau)) +
+  geom_ribbon(aes(ymin = offspring_not_pos_lwr, ymax = offspring_not_pos_upr,
+                  fill = "non-infected"), alpha = 0.2, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = offspring_pos_lwr, ymax = offspring_pos_upr,
+                  fill = "infected"), alpha = 0.2, show.legend = FALSE) +
+  geom_line(aes(y = offspring_not_pos_mean, color = "non-infected"), linewidth = 1.2) +
+  geom_line(aes(y = offspring_pos_mean, color = "infected"), linewidth = 1.2) +
+  scale_color_manual(
+    name   = NULL,
+    values = c("infected" = "#B887B0", "non-infected" = "#8CC9B8"),
+    breaks = c("infected", "non-infected"),
+    labels = c("infected", "non-infected")
+  ) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("infected" = "#B887B0", "non-infected" = "#8CC9B8"),
+    breaks = c("infected", "non-infected"),
+    labels = c("infected", "non-infected")
+  ) +
+  labs(x = "time horizon (months)", y = "expected offspring sired", tag = "(b)") +
+  theme_classic(base_size = 18) +
+  theme(
+    legend.position = c(0.84, 0.999),
+    legend.justification = c("right", "top"),
+    legend.background = element_rect(fill = alpha("white", 0.7), colour = NA),
+    legend.text = element_text(size = 14)
+  )
+
+# rename columns
+rmst_full = rmst_full %>%
+  rename(
+    `time_horizon`                 = tau,
+    `rmst non-infected`          = rmst_not_pos,
+    `rmst infected`              = rmst_pos,
+    `lost months (mean)`           = lost_mean,
+    `lost months (lower)`          = lost_lwr,
+    `lost months (upper)`        = lost_upr,
+    `non-infected offspring (mean)`  = offspring_not_pos_mean,
+    `non-infected offspring (lower)` = offspring_not_pos_lwr,
+    `non-infected offspring (upper)` = offspring_not_pos_upr,
+    `infected offspring (mean)`     = offspring_pos_mean,
+    `infected offspring (lower)`     = offspring_pos_lwr,
+    `infected offspring (upper)`     = offspring_pos_upr,
+    `offspring lost (mean)`        = offspring_lost_mean,
+    `offspring lost (lower)`       = offspring_lost_lwr,
+    `offspring lost (upper)`       = offspring_lost_upr
+  )
+
+# format
+rmst_full_fmt = rmst_full %>%
+  mutate(
+    `lost months (mean)` = sprintf("%.2f (%.2f-%.2f)", 
+                                   `lost months (mean)`, 
+                                   `lost months (lower)`, 
+                                   `lost months (upper)`),
+    `non-infected offspring (mean)` = sprintf("%.3f (%.3f-%.3f)", 
+                                              `non-infected offspring (mean)`, 
+                                              `non-infected offspring (lower)`, 
+                                              `non-infected offspring (upper)`),
+    `infected offspring (mean)` = sprintf("%.3f (%.3f-%.3f)", 
+                                          `infected offspring (mean)`, 
+                                          `infected offspring (lower)`, 
+                                          `infected offspring (upper)`),
+    `offspring lost (mean)` = sprintf("%.3f (%.3f-%.3f)", 
+                                      `offspring lost (mean)`, 
+                                      `offspring lost (lower)`, 
+                                      `offspring lost (upper)`)
+  ) %>%
+  select(-contains("(lower)"), -contains("(upper)"))
+```
+
+combine plots
+
+```{r}
+combined = smooth_inf + offspring_plot
+combined
+```
