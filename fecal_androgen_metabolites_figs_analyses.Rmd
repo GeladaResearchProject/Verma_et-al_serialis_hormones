@@ -1,0 +1,61 @@
+---
+title: "fecal_androgen_metabolites_analysis_Nov13_2025"
+author: "Medhavi Verma"
+date: "2025-11-13"
+output: html_document
+---
+
+Load libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(lme4)
+library(lmerTest)
+```
+
+
+Read in data
+
+```{r}
+fam_taenia <- read.csv("~/fecal_androgen_metabolites.csv")
+```
+
+Plotting fecal androgen metabolites by infection status
+
+```{r}
+# creating new column for leader/non-leader status
+
+fam_taenia <- fam_taenia %>% 
+  mutate(leader = ifelse(male_status == "leader", "leaders", "bachelors and followers"))
+
+fam_taenia$leader <- factor(fam_taenia$leader, levels = c("leaders", "bachelors and followers"))
+
+
+cols <- c("leaders" = "#FF1493", "bachelors and followers" = "#FFB6C1")
+
+ggplot(fam_taenia, aes(as.factor(positive), log(T_ng_g))) + geom_boxplot(alpha = 0.3, fatten = 3, width = 0.2, aes(fill = leader)) + geom_beeswarm(cex = 1, alpha = 0.4, size = 1) + theme_classic(base_size = 20) + labs(y = "log(fecal androgen metabolite concentration (ng/g))") + theme(legend.position = "none", axis.title.x = element_blank(), plot.title = element_text(size = 22, hjust = 0.5)) + scale_x_discrete(labels=c("0" = "non-infected", "1" = "infected"))+ geom_text(data = fam_taenia[fam_taenia$leader == "leaders",], aes(x = 2, y = max(log(T_ng_g), na.rm = TRUE) + 0.5, label = "**"), size = 10) + facet_wrap(~leader) + scale_fill_manual(values = cols, aesthetics = "fill") 
+
+```
+
+Linear mixed-effects modeling
+
+```{r}
+# Modeling leaders
+
+leaders <- fam_taenia[fam_taenia$male_status == "leader",]
+
+leader_model <- lmer(log(T_ng_g) ~ factor(positive) + poly(age_at_sample, 2) + factor(season) + (1|code) + (1|sample_year), data = leaders)
+
+summary(leader_model)
+
+# Modeling non-leaders
+
+non_leaders <- fam_taenia[!(fam_taenia$male_status == "leader"),]
+
+nonleader_model <- lmer(log(T_ng_g) ~ factor(positive) + poly(age_at_sample, 2) + factor(male_status) + factor(season) + (1|code) + (1|sample_year), data = non_leaders)
+
+summary(nonleader_model)
+```
+
