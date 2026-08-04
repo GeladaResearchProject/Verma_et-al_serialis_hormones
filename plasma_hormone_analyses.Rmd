@@ -1,0 +1,188 @@
+---
+title: "plasma_hormone_analyses"
+author: "Medhavi Verma"
+date: "2026-08-03"
+output: pdf_document
+---
+
+Load packages
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(performance)
+library(car)
+```
+
+Read in file
+
+```{r}
+plasma_hormones <- read_csv("~/plasma_hormones.csv", col_select = -1)
+
+```
+
+Plotting hormone concentrations by infection status
+
+```{r}
+
+cols <- c("estradiol (pg/mL)" = "#440154FF", "testosterone (ng/mL)" = "#FFB6C1")
+
+# Converting all hormone concentrations to pg/mL 
+plasma_hormones <- plasma_hormones %>% 
+  mutate(mean_pgml = ifelse(assay_type2 == "testosterone (ng/mL)", Mean*1000, Mean))
+
+
+# Males:
+
+ggplot(plasma_hormones[plasma_hormones$Sex == "M",], aes(infection, log(mean_pgml), fill = assay_type2)) + 
+  geom_boxplot(alpha = 0.3, fatten = 3, width = 0.2) + 
+  geom_beeswarm(cex = 2, size = 1) + 
+  theme_classic(base_size = 20) + 
+  labs(y = "Mean Plasma Concentration \n(pg/mL, log-transformed)") + 
+  facet_wrap(~assay_type, nrow = 1, scales="free_y") + 
+  geom_text(data = subset(plasma_hormones, Sex == "M" & assay_type2 == "estradiol (pg/mL)"), aes(x = "positive", y = max(log(mean_pgml), na.rm = TRUE) + 0.5, label = "***"), size = 10) + 
+  theme(legend.position = "none",axis.title.x = element_blank(), axis.title = element_text(size = 20), axis.text = element_text(size = 18), strip.text = element_text(size = 22)) + 
+  scale_x_discrete(labels=c("negative" = "Taenia negative", "positive" = "Taenia positive")) +
+  scale_fill_manual(values = cols, aesthetics = "fill") 
+
+
+# Females: 
+
+ggplot(plasma_hormones[plasma_hormones$Sex == "F",], aes(infection, log(mean_pgml), fill = assay_type2)) + 
+  geom_boxplot(alpha = 0.3, fatten = 3, width = 0.2) + 
+  geom_beeswarm(cex = 2) + 
+  theme_classic(base_size = 20) + 
+  labs(y = "Mean Plasma Concentration \n(pg/mL, log-transformed)") + 
+  facet_wrap(~assay_type, nrow = 1) + 
+  scale_x_discrete(labels=c("negative" = "Taenia negative", "positive" = "Taenia positive")) +
+  theme(legend.position = "none", axis.title.x = element_blank(), axis.title = element_text(size = 20), axis.text = element_text(size = 18),strip.text = element_text(size = 22)) + 
+  scale_fill_manual(values = cols, aesthetics = "fill") 
+
+```
+
+Organizing data for modeling
+
+```{r}
+# adding year column (to include as a random effect)
+
+plasma_hormones <- plasma_hormones %>%
+  mutate(
+    year = ifelse(str_detect(DRT_ID, "2017"), "2017", 
+                  ifelse(str_detect(DRT_ID, "2019"), "2019", 
+                         ifelse(str_detect(DRT_ID, "2020"), "2020", NA)))
+  )
+
+# Subsetted data for male-testosterone
+
+male_testosterone <- plasma_hormones %>% 
+  filter(Sex == "M", assay_type == "testosterone", !(male_status == "unknown"), !(Age == "Unk"), !(is.na(Mean))) %>%
+  mutate(male_status = ifelse(male_status == "natal" | male_status == "bachelor", "natal/bachelor", male_status))
+
+# Subsetted data for male-estradiol
+
+male_estradiol <- plasma_hormones %>% 
+  filter(Sex == "M", assay_type == "estradiol", !(male_status == "unknown"), !(Age == "Unk"),!(is.na(Mean))) %>%
+  mutate(male_status = ifelse(male_status == "natal" | male_status == "bachelor", "natal/bachelor", male_status))
+
+# Subsetted data for female-testosterone
+
+female_testosterone <- plasma_hormones %>% 
+  filter(Sex == "F", assay_type == "testosterone", Age == "Adult", (repro.state.2 == "cycling"))
+
+# Subsetted data for female-estradiol
+
+female_estradiol <- plasma_hormones %>% 
+  filter(Sex == "F", assay_type == "estradiol", Age == "Adult", (repro.state.2 == "cycling"))
+```
+
+Linear models
+
+1)  Male testosterone
+
+```{r}
+
+model_males_tes <- lmer(log(Mean) ~ factor(positive) + Body_mass_kg + Age+ factor(male_status)+ (1|year), data = male_testosterone)
+
+summary(model_males_tes)
+
+# Diagnostics
+
+performance::check_model(model_males_tes, check = c("qq", "linearity", "homogeneity", "outliers", "reqq"), detrend = F)
+
+vif(model_males_tes)
+
+r2(model_males_tes)
+
+```
+
+2)  Male estradiol
+
+```{r}
+
+model_males_es <- lmer(log(Mean) ~ factor(positive) + Body_mass_kg + Age + factor(male_status)+ (1|year), data = male_estradiol)
+
+summary(model_males_es)
+
+# Dropping the year random effect because its variance was estimated to be 0
+
+model_males_es <- lm(log(Mean) ~ factor(positive) + Body_mass_kg + Age + factor(male_status), data = male_estradiol)
+
+summary(model_males_es)
+
+# Diagnostics
+
+plot(model_males_es) # Residuals not entirely normal, but there are no obvious outliers 
+
+vif(model_males_es)
+
+```
+
+3)  Female testosterone
+
+```{r}
+
+model_females_tes <- lmer(log(Mean) ~ factor(positive) + Body_mass_kg+ (1|year), data = female_testosterone)
+
+summary(model_females_tes)
+
+# Diagnostics
+
+performance::check_model(model_females_tes, check = c("qq", "linearity", "homogeneity", "outliers", "reqq"), detrend = F)
+
+vif(model_females_tes)
+
+r2(model_females_tes)
+
+```
+
+4)  Female estradiol
+
+```{r}
+
+model_females_es <- lmer(log(Mean) ~ factor(positive) + Body_mass_kg+ (1|year), data = female_estradiol)
+
+summary(model_females_es)
+
+# Dropping the year random effect because its variance was estimated to be ~0
+
+model_females_es <- lm(log(Mean) ~ factor(positive) + Body_mass_kg, data = female_estradiol)
+
+summary(model_females_es)
+
+# Diagnostics
+
+plot(model_females_es) # point 3 may be an outlier. 
+
+model_females_es <- lm(log(Mean) ~ factor(positive) + Body_mass_kg, data = female_estradiol[female_estradiol$DRT_ID !="DRT_2017_05",])
+
+summary(model_females_es)
+
+plot(model_females_es)
+
+vif(model_females_es)
+
+```

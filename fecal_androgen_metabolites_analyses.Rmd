@@ -1,0 +1,214 @@
+---
+title: "fecal_androgen_metabolites_analysis"
+author: "Medhavi Verma"
+date: "2026-08-03"
+output: html_document
+---
+
+Load libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(lme4)
+library(lmerTest)
+library(AICcmodavg)
+library(performance)
+library(see)
+library(car)
+library(emmeans)
+```
+
+
+Read in data
+
+```{r}
+fam_taenia <- read.csv("~/fam_taenia.csv")
+
+```
+
+Plotting faecal androgen metabolites by infection status
+
+```{r}
+
+cols <- c("leader" = "#FF1493", "bachelor" = "#FFB6C1", "follower" = "#FFB6C1")
+
+ggplot(fam_taenia, aes(as.factor(positive), log(T_ng_g))) + 
+  geom_beeswarm(cex = 3, alpha = 0.4, size = 1) + 
+  geom_boxplot(alpha = 0.3, fatten = 3, width = 0.4, aes(fill = male_status)) + 
+  theme_classic(base_size = 20) + labs(x = "Evidence of T. serialis infection", y = "Faecal androgen metabolite concentration \n(ng/g, log-transformed)") + theme(legend.position = "none", axis.title = element_text(size = 20), axis.text = element_text(size = 18), strip.text = element_text(size = 22)) + scale_x_discrete(labels=c("0" = "absent", "1" = "present"))+ 
+  geom_text(data = fam_taenia[fam_taenia$male_status == "leader",], aes(x = 2, y = max(log(T_ng_g), na.rm = TRUE) + 0.5, label = "**"), size = 10) + 
+  facet_wrap(~male_status) + 
+  scale_fill_manual(values = cols, aesthetics = "fill") 
+
+```
+
+Model selection (comparing 16 plausible models)
+
+```{r}
+# making relevant variables into factors
+fam_taenia$male_status <- factor(fam_taenia$male_status, levels = c("leader", "follower", "bachelor"))
+fam_taenia$positive <- factor(fam_taenia$positive)
+fam_taenia$season <- factor(fam_taenia$season)
+```
+
+1. log(T) ~ infection + scale(Rain90) + status + poly(age) + 1|ID + 1|year
+
+```{r}
+model1 <- lmer(log(T_ng_g) ~ positive + poly(age_at_sample, 2) + scale(rain_90) + male_status + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+2. log(T) ~ infection + season + status + poly(age) + 1|ID + 1|year
+
+```{r}
+model2 <- lmer(log(T_ng_g) ~ positive + poly(age_at_sample, 2) + season + male_status + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+3. log(T) ~ infection + scale(Rain90)*status + poly(age) + 1|ID + 1|year
+
+```{r}
+model3 <- lmer(log(T_ng_g) ~ positive + poly(age_at_sample, 2) + scale(rain_90)*male_status+ (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+4. log(T) ~ infection + season*status + poly(age) + 1|ID + 1|year
+
+```{r}
+model4 <- lmer(log(T_ng_g) ~ positive + poly(age_at_sample, 2) + season*male_status+ (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+5. log(T) ~ infection + scale(Rain90) + status + 1|ID + 1|year
+
+```{r}
+model5 <- lmer(log(T_ng_g) ~ positive + scale(rain_90) + male_status + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+6. log(T) ~ infection + season + status + 1|ID + 1|year
+
+```{r}
+model6 <- lmer(log(T_ng_g) ~ positive + season + male_status + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+7. log(T) ~ infection + scale(Rain90) + poly(age) + 1|ID + 1|year
+
+```{r}
+model7 <- lmer(log(T_ng_g) ~ positive + scale(rain_90) + poly(age_at_sample, 2) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+8. log(T) ~ infection + season + poly(age) + 1|ID + 1|year
+
+```{r}
+model8 <- lmer(log(T_ng_g) ~ positive + season + poly(age_at_sample, 2) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+9. log(T) ~ infection + status + poly(age) + 1|ID + 1|year
+
+```{r}
+model9 <- lmer(log(T_ng_g) ~ positive + male_status + poly(age_at_sample, 2) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+10. log(T) ~ infection + status*poly(age) + scale(Rain90) + 1|ID + 1|year
+
+```{r}
+model10 <- lmer(log(T_ng_g) ~ positive + male_status*poly(age_at_sample, 2) + scale(rain_90) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+11. log(T) ~ infection + status*poly(age) + season + 1|ID + 1|year
+
+```{r}
+model11 <- lmer(log(T_ng_g) ~ positive + male_status*poly(age_at_sample, 2) + season + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+12. log(T) ~ infection + status*poly(age) + 1|ID + 1|year
+
+```{r}
+model12 <- lmer(log(T_ng_g) ~ positive + male_status*poly(age_at_sample, 2) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+13. log(T) ~ infection* status + poly(age) + scale(Rain90) + 1|ID + 1|year
+
+```{r}
+model13 <- lmer(log(T_ng_g) ~ positive*male_status + poly(age_at_sample, 2) + scale(rain_90) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+14. log(T) ~ infection* status + poly(age) + season + 1|ID + 1|year
+
+```{r}
+model14 <- lmer(log(T_ng_g) ~ positive*male_status + poly(age_at_sample, 2) + season + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+15. log(T) ~ infection* status + poly(age) + 1|ID + 1|year
+
+```{r}
+model15 <- lmer(log(T_ng_g) ~ positive*male_status + poly(age_at_sample, 2) + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+16. log(T) ~ infection* status + season + 1|ID + 1|year
+
+```{r}
+model16 <- lmer(log(T_ng_g) ~ positive*male_status + season + (1|code) + (1|sample_year), REML = F, data = fam_taenia)
+```
+
+Comparing R-squared and AICc
+
+```{r}
+r2(model1)
+r2(model2)
+r2(model3)
+r2(model4)
+r2(model5)
+r2(model6)
+r2(model7)
+r2(model8)
+r2(model9)
+r2(model10)
+r2(model11)
+r2(model12)
+r2(model13)
+r2(model14)
+r2(model15)
+r2(model16)
+
+model_set <- list(model1, model2, model3, model4, model5, model6, model7, model8, model9, model10, model11, model12, model13, model14, model15, model16)
+
+modnames <- c("mod1", "mod2", "mod3", "mod4", "mod5", "mod6", "mod7", "mod8", "mod9", "mod10", "mod11", "mod12", "mod13", "mod14", "mod15", "mod16")
+
+aictab(cand.set = model_set, modnames = modnames)
+```
+
+Top 3 models differ by deltaAICc <=2, so I am choosing Model 16, which has the highest R-squared and the interaction of interest.
+
+
+Final model: linear mixed effects
+```{r}
+fam_model <- lmer(log(T_ng_g) ~ positive*male_status + season + + (1|code) + (1|sample_year), data = fam_taenia)
+
+summary(fam_model)
+r2(fam_model)
+```
+
+Diagnostics
+
+```{r}
+
+check_model(fam_model, check = "qq")
+check_model(fam_model, check = "linearity")
+check_model(fam_model, check = "homogeneity")
+check_model(fam_model, check = "outliers")
+check_model(fam_model, check = "reqq")
+
+vif(fam_model)
+```
+
+Comparing infection effect across male statuses using Tukey pairwise tests on estimated marginal means
+- infection association with higher fams is only present for leaders
+
+```{r}
+emmeans(fam_model,
+         pairwise ~ positive | male_status)
+
+emmip(fam_model,
+      male_status ~ positive,
+      CIs = TRUE)
+```
+
