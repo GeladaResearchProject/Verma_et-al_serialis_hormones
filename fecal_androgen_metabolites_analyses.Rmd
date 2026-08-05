@@ -181,7 +181,7 @@ Top 3 models differ by deltaAICc <=2, so I am choosing Model 16, which has the h
 
 Final model: linear mixed effects
 ```{r}
-fam_model <- lmer(log(T_ng_g) ~ positive*male_status + season + + (1|code) + (1|sample_year), data = fam_taenia)
+fam_model <- lmer(log(T_ng_g) ~ positive*male_status + season + (1|code) + (1|sample_year), data = fam_taenia)
 
 summary(fam_model)
 r2(fam_model)
