@@ -1,0 +1,428 @@
+---
+title: "survival analysis"
+finalized: 30 Jul 2026
+author: India Schneider-Crease
+---
+
+this analysis evaluates whether recent evidence of taenia serialis infection is associated with the hazard of leader-tenure loss in male geladas. the workflow prepares monthly tenure and infection histories, fits and checks survival models, evaluates alternative infection classifications, and translates the primary model into predicted tenure and reproductive consequences.
+
+```{r}
+# read data
+tenure = read.csv("~/tenure.csv", na.strings = c("", "NA", "N/A", "unknown"))
+```
+
+1. data preparation: this section checks the imported data, formats dates, documents missing values, removes males without known dates of birth, imputes missing social variables, and creates  derived variables used in later analyses.
+
+```{r}
+# load initial packages
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(mice)
+
+# inspect the imported data and record the original sample size
+glimpse(tenure)
+tenure %>% summarise(n_rows = n(), n_males = n_distinct(code), n_tenures = n_distinct(tenure.id))
+
+# format the date variables
+date_vars = c("start_date_aligned", "end_date_aligned", "adjusted_end", "month", "cyst_date_aligned", "dob")
+tenure = tenure %>% mutate(across(all_of(date_vars), mdy))
+
+# confirm that the date variables were formatted correctly
+tenure %>% select(all_of(date_vars)) %>% glimpse()
+
+# identify all variables containing missing values before cleaning
+tenure %>% summarise(across(everything(), ~ sum(is.na(.x)))) %>% pivot_longer(everything(), names_to = "variable", values_to = "n_missing") %>% filter(n_missing > 0) %>% arrange(desc(n_missing))
+
+# identify males with unknown dates of birth
+tenure %>% filter(is.na(dob)) %>% summarise(n_rows = n(), n_males = n_distinct(code))
+
+# remove males with unknown dates of birth
+tenure = tenure %>% filter(!is.na(dob))
+
+# summarize
+tenure %>% summarise(n_rows = n(), n_males = n_distinct(code), n_tenures = n_distinct(tenure.id))
+
+# identify missing values in the social variables
+to_impute = c("total_follower_males", "N.Females")
+tenure %>% summarise(across(all_of(to_impute), ~ sum(is.na(.x))))
+tenure %>% filter(if_any(all_of(to_impute), is.na)) %>% summarise(n_rows_with_missing_social_data = n())
+
+# flag the values that will be imputed
+tenure = tenure %>% mutate(across(all_of(to_impute), is.na, .names = "{.col}_imputed"))
+
+# specify the variables included in the imputation model
+imputation_vars = c("event", "stop", "cyst", "age_at_month", to_impute)
+mice_method = make.method(tenure[imputation_vars])
+mice_method[] = ""
+mice_method[to_impute] = "pmm"
+
+# impute the  social variables using predictive mean matching
+imp = mice(tenure[imputation_vars], m = 1, maxit = 1, method = mice_method, seed = 1, printFlag = FALSE)
+
+# extract the completed dataset
+completed = complete(imp, 1)
+
+# replace only the missing values with their imputed values
+tenure = tenure %>% mutate(across(all_of(to_impute), ~ coalesce(.x, completed[[cur_column()]])))
+
+# create binned social variables for modeling
+tenure = tenure %>% mutate(group_size = factor(case_when(between(N.Females, 1, 4) ~ "small", between(N.Females, 5, 7) ~ "medium", between(N.Females, 8, 12) ~ "large", TRUE ~ NA_character_), levels = c("small", "medium", "large")))
+
+# confirm that no missing values remain
+tenure %>% summarise(across(all_of(to_impute), ~ sum(is.na(.x))))
+
+# confirm that the derived social variables contain no missing values
+tenure %>% summarise(across(c(all_of(to_impute), group_size, total_follower_males), ~ sum(is.na(.x))))
+
+```
+
+2. data summary and checks: this section summarizes the cleaned dataset and examines the distributions of tenure duration, cyst history, group size, and follower-male number.
+
+```{r}
+# summarize the cleaned df at the row level
+tenure %>% summarise(n_rows = n(), n_males = n_distinct(code), n_tenures = n_distinct(tenure.id), n_observed_tenure_losses = n_distinct(tenure.id[event == 1]), n_right_censored_tenures = n_distinct(tenure.id) - n_distinct(tenure.id[event == 1]), n_cyst_positive_rows = sum(cyst == 1, na.rm = TRUE), n_cyst_negative_rows = sum(cyst == 0, na.rm = TRUE), n_cyst_missing_rows = sum(is.na(cyst)), n_cyst_positive_males = n_distinct(code[cyst == 1]), n_second_tenures = n_distinct(tenure.id[grepl("-2$", tenure.id)]))
+
+# summarize cyst history at the male level
+tenure %>% summarise(cyst_history = case_when(any(cyst == 1, na.rm = TRUE) ~ "ever cyst-positive", all(is.na(cyst)) ~ "no cyst observations", TRUE ~ "never cyst-positive"), .by = code) %>% count(cyst_history, name = "n_males")
+
+# summarize group size and the number of follower males
+tenure %>% count(group_size, name = "n_rows") %>% mutate(percent = round(100 * n_rows / sum(n_rows), 1))
+tenure %>% count(total_follower_males, name = "n_rows")
+
+# confirm that tenure length is constant within each tenure
+tenure %>% summarise(n_tenure_lengths = n_distinct(tenure_length_aligned, na.rm = TRUE), .by = tenure.id) %>% filter(n_tenure_lengths > 1)
+
+# create one row per tenure for repeated descriptive summaries
+tenure_summary = tenure %>% mutate(cyst_history = if_else(any(cyst == 1, na.rm = TRUE), "ever cyst-positive", "never cyst-positive"), .by = code) %>% summarise(tenure_number = case_when(grepl("-1$", first(tenure.id)) ~ "first", grepl("-2$", first(tenure.id)) ~ "second", TRUE ~ "unclassified"), tenure_length_days = first(tenure_length_aligned), tenure_length_months = max(stop, na.rm = TRUE) - min(start, na.rm = TRUE), event_observed = any(event == 1, na.rm = TRUE), right_censored = !any(event == 1, na.rm = TRUE), .by = c(code, tenure.id, cyst_history))
+
+# summarize number of events and right censorship
+tenure_summary %>% count(event_observed, right_censored, name = "n_tenures") 
+
+# summarize tenure duration overall
+tenure_summary %>% summarise(n_tenures = n(), mean_tenure_days = mean(tenure_length_days, na.rm = TRUE), mean_tenure_years = mean(tenure_length_days, na.rm = TRUE) / 365.25, median_tenure_days = median(tenure_length_days, na.rm = TRUE), minimum_tenure_days = min(tenure_length_days, na.rm = TRUE), maximum_tenure_days = max(tenure_length_days, na.rm = TRUE))
+
+# summarize first and second tenures
+tenure_summary %>% filter(tenure_number != "unclassified") %>% group_by(tenure_number) %>% summarise(n_tenures = n(), mean_tenure_months = mean(tenure_length_months, na.rm = TRUE), median_tenure_months = median(tenure_length_months, na.rm = TRUE), minimum_tenure_months = min(tenure_length_months, na.rm = TRUE), maximum_tenure_months = max(tenure_length_months, na.rm = TRUE), .groups = "drop")
+
+# inspect the distribution of observed tenure durations
+hist(tenure_summary$tenure_length_days, main = "observed tenure durations", xlab = "tenure duration in days")
+
+# summarize tenure duration by male cyst history
+tenure_summary %>% group_by(cyst_history) %>% summarise(n_males = n_distinct(code), n_tenures = n(), mean_tenure_months = mean(tenure_length_months, na.rm = TRUE), median_tenure_months = median(tenure_length_months, na.rm = TRUE), minimum_tenure_months = min(tenure_length_months, na.rm = TRUE), maximum_tenure_months = max(tenure_length_months, na.rm = TRUE), .groups = "drop")
+
+# summarize observed follow-up after the first cyst-positive month
+tenure %>% filter(any(cyst == 1, na.rm = TRUE), .by = c(code, tenure.id)) %>% summarise(months_observed_after_cyst = max(stop, na.rm = TRUE) - min(start[cyst == 1], na.rm = TRUE), right_censored = any(end_follow_still_leader == 1, na.rm = TRUE), .by = c(code, tenure.id)) %>% summarise(n_tenures = n(), n_right_censored = sum(right_censored), mean_months_observed_after_cyst = mean(months_observed_after_cyst), minimum_months_observed_after_cyst = min(months_observed_after_cyst), maximum_months_observed_after_cyst = max(months_observed_after_cyst))
+```
+
+3. infection classification: this section links each monthly tenure observation to the most recent antigen result within the preceding 12 months. recent evidence of infection is defined as a positive antigen result within this window or a visible cyst during the current month. all other months are classified as having no recent evidence, including months with a recent negative result and months without a recent test.
+
+```{r}
+# read and format the antigen assay data
+infection_data = read.csv("~/infection_data.csv", na.strings = c("", "NA", "N/A", "unknown")) %>% rename_with(tolower) %>% select(-any_of("x")) %>% mutate(collection_date = ymd(collection_date), positive = as.integer(positive))
+
+# inspect assay data
+glimpse(infection_data)
+infection_data %>% summarise(n_samples = n(), n_males = n_distinct(code), n_missing_dates = sum(is.na(collection_date)), n_missing_results = sum(is.na(positive)))
+infection_data %>% count(positive, name = "n_samples", .drop = FALSE)
+
+# attach the most recent known assay result from the preceding 365 days
+tenure = tenure %>%
+  mutate(month_lower_bound = month - months(12)) %>%
+  left_join(infection_data %>% select(code, collection_date, positive), by = join_by(code, closest(x$month >= y$collection_date), x$month_lower_bound <= y$collection_date), relationship = "many-to-one") %>%
+  rename(last_sample_date = collection_date, last_sample_result = positive) %>%
+  mutate(days_since_last_sample = as.integer(month - last_sample_date)) %>%
+  select(-month_lower_bound)
+
+# confirm that the join retains the original number of monthly observations
+tenure %>% summarise(n_rows = n(), n_rows_with_recent_sample = sum(!is.na(last_sample_date)), minimum_days_since_sample = min(days_since_last_sample, na.rm = TRUE), maximum_days_since_sample = max(days_since_last_sample, na.rm = TRUE))
+
+# inspect the time between the assay and the corresponding tenure month
+hist(na.omit(tenure$days_since_last_sample), main = "time since most recent antigen test", xlab = "days")
+
+# combine recent antigen results and current cyst observations
+tenure = tenure %>% mutate(recent_infection_status = factor(case_when(cyst == 1 | last_sample_result == 1 ~ "detected", cyst == 0 & last_sample_result == 0 ~ "negative", TRUE ~ "unknown"), levels = c("unknown", "negative", "detected")),
+  infection_evidence = factor(if_else(recent_infection_status == "detected", "detected", "not_detected"), levels = c("not_detected", "detected")))
+
+# summarize the detailed and binary classifications
+tenure %>% count(recent_infection_status, name = "n_rows")
+tenure %>% count(infection_evidence, name = "n_rows")
+
+# summarize infection evidence at observed tenure loss
+tenure %>% filter(event == 1) %>% count(recent_infection_status, name = "n_tenure_losses")
+tenure %>% filter(event == 1) %>% count(infection_evidence, name = "n_tenure_losses")
+
+# create one record per tenure
+tenure_level = tenure %>% summarise(duration_months = max(stop), event = max(event), .by = c(tenure.id, code))
+
+# calculate descriptive observed durations
+tenure_level %>% summarise(
+  tenures = n(), males = n_distinct(code), tenure_losses = sum(event == 1, na.rm = TRUE),
+  censored_tenures = sum(event == 0, na.rm = TRUE), mean_duration_months = mean(duration_months, na.rm = TRUE), median_duration_months = median(duration_months, na.rm = TRUE), minimum_duration_months = min(duration_months, na.rm = TRUE), maximum_duration_months = max(duration_months, na.rm = TRUE))
+
+# plot the distribution of unique tenures
+hist(tenure_level$duration_months, breaks = 15, main = "Observed tenure duration", xlab = "Tenure duration (months)")
+```
+
+4. primary model and model checks: this section evaluates support for the infection comparison within the event risk sets, fits the primary counting-process cox model, and checks the proportional-hazards and linearity assumptions. the model estimates tenure-loss hazard as a function of recent infection evidence, age, and follower-male number while allowing the baseline hazard to differ among group-size categories. the infection hazard ratio is also evaluated using a male-level bootstrap that resamples complete male histories.
+
+```{r}
+# load packages used for survival modeling and model summaries
+library(survival)
+library(broom)
+
+# confirm that the model variables contain no missing values
+tenure %>% summarise(across(c(start, stop, event, infection_evidence, age_at_month, total_follower_males, group_size, code, tenure.id), ~ sum(is.na(.x))))
+
+# summarize the exposure distribution
+tenure %>% summarise(n_rows = n(), n_males = n_distinct(code), n_tenures = n_distinct(tenure.id), n_events = sum(event), .by = infection_evidence)
+
+# identify the event times within each group-size stratum
+event_times = tenure %>% filter(event == 1) %>% mutate(event_time = stop) %>% summarise(n_events = n(), detected_events = sum(infection_evidence == "detected"), .by = c(event_time, group_size))
+
+# examine whether both infection-evidence categories are represented in each event risk set
+risk_set_support = event_times %>% left_join(tenure %>% select(tenure.id, start, stop, group_size, infection_evidence), by = join_by(group_size, x$event_time > y$start, x$event_time <= y$stop), relationship = "many-to-many") %>%
+  summarise(n_events = first(n_events), detected_events = first(detected_events), at_risk_detected = n_distinct(tenure.id[infection_evidence == "detected"]), at_risk_not_detected = n_distinct(tenure.id[infection_evidence == "not_detected"]), .by = c(event_time, group_size)) %>% mutate(informative = at_risk_detected > 0 & at_risk_not_detected > 0)
+
+# summarize support within the event risk sets
+risk_set_support %>% summarise(n_event_risk_sets = n(), n_informative_risk_sets = sum(informative), n_events = sum(n_events), n_events_in_informative_risk_sets = sum(n_events[informative]), n_detected_events = sum(detected_events), n_detected_events_in_informative_risk_sets = sum(detected_events[informative]))
+
+# fit the primary cox proportional hazards model
+cm1 = coxph(Surv(start, stop, event) ~ infection_evidence + age_at_month + total_follower_males + strata(group_size), data = tenure, ties = "efron", id = tenure.id, cluster = code, x = TRUE)
+
+# inspect the primary model
+summary(cm1)
+
+# create a numerical results table
+coxresults_cm1 = tidy(cm1, exponentiate = TRUE, conf.int = TRUE) %>% select(term, hazard_ratio = estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+coxresults_cm1
+
+# inspect model concordance
+summary(cm1)$concordance
+
+# test the proportional hazards assumption
+ph_cm1 = cox.zph(cm1)
+ph_cm1
+
+# visually inspect the proportional hazards assumption
+par(mfrow = c(1, 3))
+plot(ph_cm1, var = "infection_evidence")
+plot(ph_cm1, var = "age_at_month")
+plot(ph_cm1, var = "total_follower_males")
+par(mfrow = c(1, 1))
+
+# add quadratic terms to check for nonlinear covariate effects
+cm1_shape = update(cm1, . ~ . + I(age_at_month^2) + I(total_follower_males^2))
+
+# inspect the quadratic terms
+summary(cm1_shape)$coefficients[c("I(age_at_month^2)", "I(total_follower_males^2)"), , drop = FALSE]
+
+# evaluate hazard ratio using male-level bootstrap that resamples complete male histories.
+
+library(purrr)
+
+# bootstrap the primary infection hazard ratio by resampling males
+set.seed(123)
+B = 5000
+male_codes = unique(tenure$code)
+
+bootstrap_hr = map_dfr(seq_len(B), function(b) {
+  bootstrap_index = tibble(original_code = sample(male_codes, length(male_codes), replace = TRUE), bootstrap_copy = seq_along(original_code))
+
+  bootstrap_data = bootstrap_index %>%
+    inner_join(tenure %>% rename(original_code = code, original_tenure = tenure.id), by = "original_code", relationship = "many-to-many") %>%
+    mutate(code = paste0(original_code, "_", bootstrap_copy), tenure.id = paste0(original_tenure, "_", bootstrap_copy))
+
+  tryCatch({
+    bootstrap_fit = suppressWarnings(coxph(Surv(start, stop, event) ~ infection_evidence + age_at_month + total_follower_males + strata(group_size), data = bootstrap_data, ties = "efron", id = tenure.id, cluster = code))
+    infection_log_hr = unname(coef(bootstrap_fit)["infection_evidencedetected"])
+    if (!is.finite(infection_log_hr)) stop("non-finite infection coefficient")
+    tibble(rep = b, infection_log_hr, hazard_ratio = exp(infection_log_hr))
+  }, error = function(e) NULL)
+})
+
+# inspect bootstrap completion 
+bootstrap_hr %>% summarise(requested_bootstraps = B, successful_bootstraps = n(), percent_successful = round(100 * n() / B, 1),
+    median_hazard_ratio = median(hazard_ratio), minimum_hazard_ratio = min(hazard_ratio), maximum_hazard_ratio = max(hazard_ratio))
+
+# calculate the percentile bootstrap confidence interval
+bootstrap_hr_ci = bootstrap_hr %>% summarise(method = "male-level percentile bootstrap", hazard_ratio = exp(unname(coef(cm1)["infection_evidencedetected"])), conf.low = exp(quantile(infection_log_hr, 0.025)), conf.high = exp(quantile(infection_log_hr, 0.975)))
+
+# extract the model-based cluster-robust confidence interval
+robust_hr_ci = tidy(cm1, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "infection_evidencedetected") %>%
+  transmute(method = "model-based cluster-robust", hazard_ratio = estimate, conf.low, conf.high)
+
+# compare the two confidence intervals
+hr_ci_comparison = bind_rows(robust_hr_ci, bootstrap_hr_ci) %>% mutate(across(c(hazard_ratio, conf.low, conf.high), ~ round(.x, 2)))
+hr_ci_comparison
+
+# inspect the bootstrap distribution
+hist(bootstrap_hr$infection_log_hr, breaks = 30, main = "bootstrap distribution of the infection coefficient", xlab = "log hazard ratio")
+abline(v = unname(coef(cm1)["infection_evidencedetected"]), lwd = 2, lty = 2)
+
+# create a results table with hazard ratios and percent changes in hazard
+coxresults_cm1 = tidy(cm1, exponentiate = TRUE, conf.int = TRUE) %>%
+  transmute(term,
+    hazard_ratio = estimate, robust_conf_low = conf.low, robust_conf_high = conf.high, 
+    percent_change = 100 * (estimate - 1), percent_conf_low = 100 * (conf.low - 1), percent_conf_high = 100 * (conf.high - 1),
+    p_value = p.value) %>%
+  left_join(bootstrap_hr_ci %>% transmute(term = "infection_evidencedetected",
+        bootstrap_conf_low = conf.low, bootstrap_conf_high = conf.high, bootstrap_percent_conf_low = 100 * (conf.low - 1), bootstrap_percent_conf_high = 100 * (conf.high - 1)), by = "term") %>% mutate(predictor = case_match(term,
+      "infection_evidencedetected" ~ "recent evidence of infection",
+      "age_at_month" ~ "age",
+      "total_follower_males" ~ "number of follower males",
+      .default = term),
+    hazard_ratio_ci = sprintf("%.2f (%.2f–%.2f)", hazard_ratio, robust_conf_low, robust_conf_high), percent_change_ci = sprintf("%.1f%% (95%% CI: %.1f%% to %.1f%%)", percent_change, percent_conf_low, percent_conf_high), bootstrap_ci = if_else(!is.na(bootstrap_conf_low), sprintf("%.2f–%.2f [%.1f%% to %.1f%%]", bootstrap_conf_low, bootstrap_conf_high, bootstrap_percent_conf_low, bootstrap_percent_conf_high), NA_character_), p_value = case_when(p_value < 0.001 ~ "<0.001", TRUE ~ sprintf("%.3f", p_value))) %>% select(predictor, hazard_ratio_ci, percent_change_ci, bootstrap_ci, p_value)
+
+coxresults_cm1
+```
+
+5. six-month infection classification: this section links each monthly observation to the most recent prior antigen result and classifies recent evidence of infection using a narrower 6-month window.
+
+```{r}
+# attach the most recent test result without imposing the one-year limit
+tenure = tenure %>% select(-any_of(c("last_test_date", "last_test_result", "last_test_status", "infection_history"))) %>% left_join(infection_data %>% select(code, last_test_date = collection_date, last_test_result = positive), by = join_by(code, closest(x$month >= y$last_test_date)), relationship = "many-to-one") %>% arrange(code, month)
+
+# classify recent infection evidence using a six-month window
+tenure = tenure %>% mutate(infection_evidence_6m = factor(if_else(coalesce(cyst == 1, FALSE) | coalesce(last_test_result == 1 & last_test_date >= month %m-% months(6), FALSE), "detected", "not_detected"), levels = c("not_detected", "detected")))
+
+# examine rows and events under each classification
+tenure %>% summarise(n_rows = n(), n_events = sum(event, na.rm = TRUE), .by = infection_evidence_6m)
+
+# fit 6m model
+cm1_6m = update(cm1, . ~ . - infection_evidence + infection_evidence_6m, data = tenure)
+summary(cm1_6m)
+
+# combine focal infection estimates across models
+infection_results_table = bind_rows(
+  tidy(cm1, exponentiate = TRUE, conf.int = TRUE) %>% mutate(model_order = 1, analysis = "primary", model = "12-month window"),
+  tidy(cm1_6m, exponentiate = TRUE, conf.int = TRUE) %>% mutate(model_order = 2, analysis = "sensitivity", model = "6-month window")
+) %>%
+  filter(term %in% c("infection_evidencedetected", "infection_evidence_6mdetected")) %>%
+  mutate(
+    comparison = "detected vs not detected",
+    hazard_ratio_95_ci = sprintf("%.2f (%.2f–%.2f)", estimate, conf.low, conf.high),
+    percent_change_95_ci = sprintf("%.1f%% (%.1f%% to %.1f%%)", 100 * (estimate - 1), 100 * (conf.low - 1), 100 * (conf.high - 1)),
+    p_value = if_else(p.value < 0.001, "<0.001", sprintf("%.3f", p.value))
+  ) %>%
+  arrange(model_order) %>%
+  select(analysis, model, comparison, hazard_ratio_95_ci, percent_change_95_ci, p_value)
+```
+
+
+6. primary-model visualization: this section predicts adjusted tenure-retention curves for a male beginning tenure at the median starting age among males in medium groups with no follower males. follower number is fixed at zero, group size is fixed at medium, age increases monthly, and infection evidence is held constant across the prediction period.
+
+```{r}
+library(ggplot2)
+
+# confirm factor levels used by the primary model
+tenure = tenure %>% mutate(infection_evidence = factor(infection_evidence, levels = c("not_detected", "detected")), group_size = factor(group_size, levels = c("small", "medium", "large")))
+
+# define the representative profile and plotting horizon
+representative_group_size = "medium"
+representative_followers = 0
+representative_age = tenure %>% filter(start == 0, group_size == representative_group_size, total_follower_males == representative_followers) %>% summarise(value = median(age_at_month, na.rm = TRUE)) %>% pull(value)
+plot_horizon = 70
+
+# inspect the representative profile
+tibble(starting_age = representative_age, total_follower_males = representative_followers, group_size = representative_group_size)
+
+# create monthly covariate paths for both infection categories
+curve_newdata = expand_grid(curve_id = factor(c("not_detected", "detected"), levels = c("not_detected", "detected")), start = 0:(plot_horizon - 1)) %>% mutate(stop = start + 1, event = 0, infection_evidence = factor(as.character(curve_id), levels = levels(tenure$infection_evidence)), age_at_month = representative_age + start / 12, total_follower_males = representative_followers, group_size = factor(representative_group_size, levels = levels(tenure$group_size)))
+
+# predict adjusted survival curves and confidence intervals
+conditional_survival = survfit(cm1, newdata = curve_newdata, id = curve_id, se.fit = TRUE, conf.type = "log-log")
+curve_counts = as.integer(conditional_survival$strata)
+
+# extract predicted survival estimates
+survival_curves = tibble(time = conditional_survival$time, surv = as.numeric(conditional_survival$surv), lower = as.numeric(conditional_survival$lower), upper = as.numeric(conditional_survival$upper),
+  group = rep(c("not_detected", "detected"), times = curve_counts)) %>%
+  filter(time <= plot_horizon) %>% bind_rows(tibble(time = 0, surv = 1, lower = 1, upper = 1, group = c("not_detected", "detected"))) %>% arrange(group, time) %>% mutate(group = factor(if_else(group == "detected", "recent evidence of infection", "no recent evidence of infection"), levels = c("recent evidence of infection", "no recent evidence of infection")))
+
+# create the primary model annotation
+infection_label = tidy(cm1, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == "infection_evidencedetected") %>%
+  transmute(label = sprintf("adjusted HR = %.2f\n95%% CI: %.2f–%.2f\n%s", estimate, conf.low, conf.high, if_else(p.value < 0.001, "p < 0.001", sprintf("p = %.3f", p.value)))) %>% pull(label)
+
+# define formatting shared by both panels
+panel_theme = theme_classic(base_size = 22) + theme(plot.tag = element_text(size = 22))
+
+survival_plot = ggplot(survival_curves, aes(time, surv, color = group)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = group), alpha = 0.18, color = NA, show.legend = FALSE) +
+  geom_step(linewidth = 1.2) +
+  annotate("text", x = Inf, y = Inf, label = infection_label, hjust = 1.08, vjust = 1.25, size = 8, lineheight = 1.15, color = "grey35") +
+  scale_color_manual(values = c("recent evidence of infection" = "#B887B0", "no recent evidence of infection" = "#8CC9B8"), name = NULL) +
+  scale_fill_manual(values = c("recent evidence of infection" = "#B887B0", "no recent evidence of infection" = "#8CC9B8"), name = NULL) +
+  scale_x_continuous(breaks = c(0, 12, 24, 36, 48, 60), limits = c(0, 70), expand = expansion(mult = c(0, 0.01))) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1), expand = expansion(mult = c(0, 0.02))) +
+  guides(color = guide_legend(override.aes = list(linewidth = 2.5))) +
+  labs(x = "time (months)", y = "survival probability\n(tenure retained)", tag = "(a)") +
+  panel_theme +
+  theme(legend.position = "bottom", legend.direction = "horizontal", legend.justification = "left", legend.box.just = "left",
+  legend.text = element_text(size = 18), legend.background = element_rect(fill = "white", colour = "grey70", linewidth = 0.9))
+
+survival_plot
+
+# save to parallelize bootstrap run on HPC
+saveRDS(tenure, "~/tenure_bootstrap_input.rds")
+```
+
+7. standardized tenure and reproductive predictions: this section reads the standardized rmst and bootstrap results, plots expected offspring under both infection-evidence conditions, and formats the rmst and expected-offspring estimates for reporting. the underlying analysis averages predictions across empirical tenure-start profiles while giving each male equal total weight, retaining each tenure’s starting age and group-size category, and fixing follower number at zero.
+
+```{r}
+# calculate rmst and bootstrap to calculate 95% CIs. see tenure_bootstrap.R for script run on ASU HPC Sol.
+
+# read in rmst results
+rmst_full = readRDS("~/rmst_full_results.rds")
+
+# define the plotted time horizons
+plot_taus = c(12, 24, 36, 48, 60)
+
+# recover the mean observed tenure horizon from the results
+average_tenure_horizon = rmst_full %>% filter(horizon == "mean observed tenure") %>% pull(tau)
+
+# prepare expected-offspring estimates for plotting
+offspring_plot_data = bind_rows(
+  rmst_full %>% transmute(tau, offspring = offspring_not_detected, conf_low = offspring_not_detected_lwr, conf_high = offspring_not_detected_upr, group = "no recent evidence of infection"),
+  rmst_full %>% transmute(tau, offspring = offspring_detected, conf_low = offspring_detected_lwr, conf_high = offspring_detected_upr, group = "recent evidence of infection")) %>%
+  mutate(group = factor(group, levels = c("recent evidence of infection", "no recent evidence of infection")))
+
+# plot expected offspring sired with the primary horizon and bootstrap confidence intervals
+offspring_plot = ggplot(offspring_plot_data, aes(tau, offspring, color = group)) +
+  geom_vline(xintercept = average_tenure_horizon, linetype = "dashed", linewidth = 1, color = "grey55") +
+  geom_ribbon(aes(ymin = conf_low, ymax = conf_high, fill = group), alpha = 0.18, color = NA, show.legend = FALSE) +
+  geom_line(linewidth = 1.2, show.legend = FALSE) +
+  geom_point(size = 2, show.legend = FALSE) +
+  annotate("text", x = average_tenure_horizon + 1, y = Inf, label = paste0("average tenure\n", round(average_tenure_horizon, 1), " months"), hjust = 0, vjust = 1.2, size = 8, color = "grey35") +
+  scale_color_manual(values = c("recent evidence of infection" = "#B887B0", "no recent evidence of infection" = "#8CC9B8"), name = NULL) +
+  scale_fill_manual(values = c("recent evidence of infection" = "#B887B0", "no recent evidence of infection" = "#8CC9B8"), name = NULL) +
+  scale_x_continuous(breaks = plot_taus, labels = plot_taus, expand = expansion(mult = c(0, 0.01))) +
+  scale_y_continuous(breaks = seq(0, 8, by = 2), labels = function(x) sprintf("%.2f", x), expand = expansion(mult = c(0, 0.02))) + coord_cartesian(ylim = c(0, 8)) + labs(x = "time horizon (months)", y = "expected offspring\nsired", tag = "(b)") + panel_theme + theme(legend.position = "none")
+
+offspring_plot
+
+# create the transposed rmst and expected-offspring table
+rmst_results = bind_rows(
+  rmst_full %>% transmute(row_order = 1, tau, measure = "RMST: no recent evidence detected, months", estimate_ci = sprintf("%.2f (%.2f to %.2f)", rmst_not_detected, rmst_not_detected_lwr, rmst_not_detected_upr)),
+  rmst_full %>% transmute(row_order = 2, tau, measure = "RMST: recent evidence detected, months", estimate_ci = sprintf("%.2f (%.2f to %.2f)", rmst_detected, rmst_detected_lwr, rmst_detected_upr)),
+  rmst_full %>% transmute(row_order = 3, tau, measure = "Months lost", estimate_ci = sprintf("%.2f (%.2f to %.2f)", lost_months, lost_months_lwr, lost_months_upr)),
+  rmst_full %>% transmute(row_order = 4, tau, measure = "Expected offspring: no recent evidence detected", estimate_ci = sprintf("%.2f (%.2f to %.2f)", offspring_not_detected, offspring_not_detected_lwr, offspring_not_detected_upr)),
+  rmst_full %>% transmute(row_order = 5, tau, measure = "Expected offspring: recent evidence detected", estimate_ci = sprintf("%.2f (%.2f to %.2f)", offspring_detected, offspring_detected_lwr, offspring_detected_upr)),
+  rmst_full %>% transmute(row_order = 6, tau, measure = "Expected offspring lost", estimate_ci = sprintf("%.2f (%.2f to %.2f)", offspring_lost, offspring_lost_lwr, offspring_lost_upr))
+) %>% mutate(tau = if_else(near(tau, round(tau)), paste0(sprintf("%.0f", tau), " months"), paste0(sprintf("%.1f", tau), " months"))) %>% pivot_wider(id_cols = c(row_order, measure), names_from = tau, values_from = estimate_ci) %>% arrange(row_order) %>% select(-row_order)
+
+rmst_results
+```
+
+8. figure assembly: this section combines the adjusted tenure-retention and expected-offspring panels into a single figure with a shared infection-evidence legend.
+
+```{r}
+library(patchwork)
+
+# combine panels with one shared legend
+combined_figure = wrap_plots(survival_plot, guide_area(), offspring_plot,
+  ncol = 1, heights = c(1, 0.12, 0.8), guides = "collect") 
+
+combined_figure
+```
+
