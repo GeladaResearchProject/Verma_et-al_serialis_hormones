@@ -9,7 +9,7 @@ There are three R code files and four data files for this paper. The code specif
 - Mean: Mean plasma hormone concentration of two replicates
 - Std.Dev: Standard Deviation of plasma hormone concentration
 - CV: Coefficient of Variation across replicates
-- assay_type: Testosterone or estradiol assay
+- assay_type: Testosterone or oestradiol assay
 - Sex: Sex of individual
 - Age: Age category of individual (Adult or Subadult)
 - male_status: Social status of male (bachelor, follower, or natal)
