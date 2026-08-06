@@ -1,3 +1,5 @@
+#This code estimates restricted mean survival time and expected offspring under recent evidence of infection and no recent evidence of #infection. the script resamples complete male tenure histories, refits the primary cox model across 1,000 male-level bootstrap replicates, #repeats the standardized predictions, and calculates 95% percentile bootstrap confidence intervals. this analysis was run using parallel #processing on ASU’s Sol high-performance computing cluster.
+
 # load packages
 library(survival)
 library(dplyr)
