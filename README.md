@@ -36,6 +36,7 @@ There are three R code files and four data files for this paper. The code specif
 - rain_90: 90-day rainfall (mm)
 
 3. Tenure survival analyses and figures: tenure.csv, infection_data.csv & survival_analysis.Rmd
+   
 tenure.csv   
 - code: Unique male ID
 - tenure.id: Unique leadership-tenure ID
