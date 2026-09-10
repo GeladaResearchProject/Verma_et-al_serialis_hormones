@@ -20,7 +20,7 @@ There are three R code files and four data files for this paper. The code specif
 - assay_type2: Recoded assay type with unit
 - repro.state.2: Female reproductive state (immature, cycling, pregnant, or unknown)
 
-2. Fecal androgen metabolite figures and analyses: fecal_androgen_metabolites.csv & fecal_androgen_metabolites_figs_analyses.Rmd
+2. Fecal androgen metabolite figures and analyses: fam_taenia.csv, fecal_androgen_metabolites_figs_analyses.Rmd, fecal_androgen_metabolites.restrictive.Rmd 
 
 - code: Unique individual ID
 - sample_year: Year of faecal sample collection
