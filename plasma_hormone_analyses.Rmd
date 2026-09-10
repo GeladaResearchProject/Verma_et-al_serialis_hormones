@@ -38,7 +38,7 @@ plasma_hormones <- plasma_hormones %>%
 
 # Males:
 
-ggplot(plasma_hormones[plasma_hormones$Sex == "M",], aes(infection, log(mean_pgml), fill = assay_type2)) + 
+ggplot(plasma_hormones[plasma_hormones$Sex == "M" & !(plasma_hormones$male_status == "unknown") & !(plasma_hormones$Age == "Unk"),], aes(infection, log(mean_pgml), fill = assay_type2)) + 
   geom_boxplot(alpha = 0.3, fatten = 3, width = 0.2) + 
   geom_beeswarm(cex = 2, size = 1) + 
   theme_classic(base_size = 20) + 
@@ -52,7 +52,7 @@ ggplot(plasma_hormones[plasma_hormones$Sex == "M",], aes(infection, log(mean_pgm
 
 # Females: 
 
-ggplot(plasma_hormones[plasma_hormones$Sex == "F",], aes(infection, log(mean_pgml), fill = assay_type2)) + 
+ggplot(plasma_hormones[plasma_hormones$Sex == "F" & plasma_hormones$Age == "Adult" & plasma_hormones$repro.state.2 == "cycling",], aes(infection, log(mean_pgml), fill = assay_type2)) + 
   geom_boxplot(alpha = 0.3, fatten = 3, width = 0.2) + 
   geom_beeswarm(cex = 2) + 
   theme_classic(base_size = 20) + 
