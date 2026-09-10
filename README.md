@@ -35,7 +35,7 @@ There are three R code files and four data files for this paper. The code specif
 - season: Season at time of faecal sample collection (Hot Dry/Cold Dry/Cold Wet)
 - rain_90: 90-day rainfall (mm)
 
-3. Tenure survival analyses and figures: tenure.csv, infection_data.csv & survival_analysis.Rmd
+3. Tenure survival analyses and figures: tenure.csv, infection_data.csv, rmst_full_results.csv, tenure_bootstrap.R & survival_analysis.Rmd
    
 tenure.csv   
 - code: Unique male ID
@@ -63,3 +63,12 @@ infection_data.csv
 - collection_date: Antigen sample collection date
 - positive: Antigen-assay result (0 = negative, 1 = positive)
 - sample_type: Sample type used for antigen testing (urine/plasma)
+
+rmst_full_results.Rmd (results from bootstrapping performed on HPC, code in tenure_bootstrap.R)
+columns are progressive time horizons at which tenure retained is estimated for individuals with and without evidence of infection. 
+row 1: restricted mean time lost (no recent evidence of infection) in months
+row 2: restricted mean time lost (recent evidence of infection) in months
+row 3: months lost (difference between rows 1-2)
+row 4: expected offspring (no recent evidence of infection) 
+row 5: expected offspring (recent evidence of infection) 
+row 6: offspring lost (difference between rows 5+6)
