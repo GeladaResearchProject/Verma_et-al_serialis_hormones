@@ -1,0 +1,62 @@
+---
+title: "fam_restrictive_datasets"
+author: "Medhavi Verma"
+date: "2026-09-10"
+output: html_document
+---
+
+Load libraries
+```{r}
+library(lme4)
+library(lmerTest)
+```
+
+
+Read in fam_taenia data
+```{r}
+fam_taenia <- read.csv("~/fam_taenia.csv")
+```
+
+
+Create more restrictive datasets: fam-taenia window of 6 months, 3 months, and 1 month
+```{r}
+under_6mo <- fam_taenia[fam_taenia$time_since_taenia <= 183,]
+length(unique(under_6mo$code))
+
+under_3mo <- fam_taenia[fam_taenia$time_since_taenia <= 92,]
+length(unique(under_3mo$code))
+
+under_1mo <- fam_taenia[fam_taenia$time_since_taenia <= 31,]
+length(unique(under_1mo$code))
+```
+
+Making relevant variables into factors
+```{r}
+under_6mo$male_status <- factor(under_6mo$male_status, levels = c("leader", "follower", "bachelor"))
+under_6mo$positive <- factor(under_6mo$positive)
+under_6mo$season <- factor(under_6mo$season)
+
+under_3mo$male_status <- factor(under_3mo$male_status, levels = c("leader", "follower", "bachelor"))
+under_3mo$positive <- factor(under_3mo$positive)
+under_3mo$season <- factor(under_3mo$season)
+
+under_1mo$male_status <- factor(under_1mo$male_status, levels = c("leader", "follower", "bachelor"))
+under_1mo$positive <- factor(under_1mo$positive)
+under_1mo$season <- factor(under_1mo$season)
+
+```
+
+
+Model
+- Significant effect of infection on fams persists across restrictive datasets
+```{r}
+
+fam_model_6mo <- lmer(log(T_ng_g) ~ factor(positive)*male_status + season + (1|code) + (1|sample_year), data = under_6mo)
+fam_model_3mo <- lmer(log(T_ng_g) ~ factor(positive)*male_status + season + (1|code) + (1|sample_year), data = under_3mo)
+fam_model_1mo <- lmer(log(T_ng_g) ~ factor(positive)*male_status + season + (1|code) + (1|sample_year), data = under_1mo)
+
+summary(fam_model_6mo)
+summary(fam_model_3mo)
+summary(fam_model_1mo)
+```
+
